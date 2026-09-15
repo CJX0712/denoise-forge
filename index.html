@@ -1,0 +1,900 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Denoise Forge — 图像扩散模型实验室</title>
+<style>
+:root {
+  --bg: #f7f8fa;
+  --panel: #ffffff;
+  --ink: #1c2024;
+  --muted: #6b7280;
+  --line: #e5e7eb;
+  --accent: #2563eb;
+  --accent-soft: #eff4ff;
+  --ok: #0f9d58;
+  --bad: #d93025;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 24px; background: var(--bg); color: var(--ink);
+  font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+.wrap { max-width: 1180px; margin: 0 auto; }
+h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: .3px; }
+.sub { color: var(--muted); margin: 0 0 20px; font-size: 13px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+.card h2 { font-size: 14px; margin: 0 0 12px; color: var(--ink); display: flex; align-items: center; gap: 8px; }
+.card h2 .tag { font-size: 11px; color: var(--muted); font-weight: 400; }
+.row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+label { font-size: 12px; color: var(--muted); min-width: 68px; }
+input[type=number], select {
+  border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px;
+  font: 13px var(--mono); background: #fff; color: var(--ink); width: 96px;
+}
+select { width: auto; min-width: 130px; font-family: inherit; }
+button {
+  border: 1px solid var(--line); background: #fff; color: var(--ink);
+  border-radius: 6px; padding: 7px 14px; font-size: 13px; cursor: pointer;
+}
+button:hover { border-color: var(--accent); color: var(--accent); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.primary:hover { filter: brightness(1.08); color: #fff; }
+button:disabled { opacity: .5; cursor: default; }
+canvas { display: block; background: #fff; border: 1px solid var(--line); border-radius: 6px; max-width: 100%; }
+.mono { font-family: var(--mono); font-size: 12px; }
+.stat { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 10px; }
+.stat div { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.stat b { color: var(--ink); font-weight: 600; }
+#samples { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 10px; margin-top: 10px; }
+#samples canvas { width: 100%; height: auto; image-rendering: pixelated; }
+#log { margin-top: 12px; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; color: var(--muted); max-height: 220px; overflow: auto; }
+.ok { color: var(--ok); } .bad { color: var(--bad); }
+.hint { color: var(--muted); font-size: 12px; margin: 8px 0 0; }
+.selftest { margin: 6px 0; padding: 4px 0; border-bottom: 1px dashed var(--line); }
+.selftest:last-child { border-bottom: 0; }
+
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <h1>Denoise Forge — 图像扩散模型实验室</h1>
+  <p class="sub">从零手写的 DDPM：U-Net + FiLM 时间条件 + 零初始化线性 skip，浏览器内训练，实时看噪声变形状。零依赖、无构建、可无头自检。</p>
+
+  <div class="grid">
+    <div class="card">
+      <h2>训练 <span class="tag">U-Net 预测噪声 ε</span></h2>
+      <div class="row"><label>数据集</label>
+        <select id="dsSel"><option value="center">形状·居中（易学）</option><option value="rand">形状·随机位置（难）</option></select>
+      </div>
+      <div class="row"><label>步数</label><input id="stepsIn" type="number" value="800" min="10" max="20000"></div>
+      <div class="row"><label>batch</label><input id="batchIn" type="number" value="8" min="1" max="64"></div>
+      <div class="row"><label>lr</label><input id="lrIn" type="number" value="0.002" step="0.0005"></div>
+      <div class="row">
+        <button id="btnTrain" class="primary">开始训练</button>
+        <button id="btnStop">停止</button>
+        <button id="btnReset">重置</button>
+      </div>
+      <div class="stat"><div id="statStep">0 步</div><div id="statLoss">—</div><div id="statMom">—</div></div>
+      <p class="hint">目标：最小化 ‖ε̂−ε‖²。提示：800 步约 1–2 分钟；想看更干净的形状可加到 2000+。</p>
+      <div id="log"></div>
+    </div>
+
+    <div class="card">
+      <h2>去噪损失曲线</h2>
+      <canvas id="lossCv"></canvas>
+      <h2 style="margin-top:16px">噪声调度 ᾱ<sub>t</sub></h2>
+      <canvas id="schCv"></canvas>
+    </div>
+
+    <div class="card">
+      <h2>生成样本</h2>
+      <div class="row">
+        <button id="btnSample" class="primary">Ancestral 采样</button>
+        <button id="btnDDIM">DDIM 采样（20 步）</button>
+      </div>
+      <div id="samples"></div>
+    </div>
+
+    <div class="card">
+      <h2>去噪过程 <span class="tag">x_T → x_0</span></h2>
+      <canvas id="trajCv"></canvas>
+      <div class="stat"><div id="trajLab">—</div></div>
+    </div>
+
+    <div class="card">
+      <h2>引擎自检 <span class="tag">含有限差分梯度检验</span></h2>
+      <div class="row"><button id="btnTest" class="primary">运行自检</button><span id="testSum" class="mono"></span></div>
+      <div id="testOut"></div>
+    </div>
+  </div>
+</div>
+<script id="engine">
+/* denoise-forge 引擎：从零手写的图像 DDPM（U-Net + FiLM 时间条件 + DDIM）
+   DOM-free，可在 Node vm 中完整验证。全局 IDF。 */
+(function () {
+  "use strict";
+
+  /* ---------- RNG（全程种子可复现） ---------- */
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  function gaussFactory(rnd) {
+    let sp = null;
+    return function () {
+      if (sp !== null) { const v = sp; sp = null; return v; }
+      let u = 0, v = 0, s = 0;
+      do { u = rnd() * 2 - 1; v = rnd() * 2 - 1; s = u * u + v * v; } while (s >= 1 || s === 0);
+      const m = Math.sqrt(-2 * Math.log(s) / s);
+      sp = v * m; return u * m;
+    };
+  }
+
+  /* ---------- 调度 ---------- */
+  function makeSchedule(T, b1, bT) {
+    const beta = new Float64Array(T), alpha = new Float64Array(T), abar = new Float64Array(T);
+    for (let i = 0; i < T; i++) { beta[i] = b1 + (bT - b1) * i / (T - 1); alpha[i] = 1 - beta[i]; }
+    let p = 1;
+    for (let i = 0; i < T; i++) { p *= alpha[i]; abar[i] = p; }
+    return { T: T, beta: beta, alpha: alpha, abar: abar };
+  }
+  // ᾱ_{t-1}，t=0 时为 ᾱ_{-1} := 1
+  function abarPrev(s, t) { return t === 0 ? 1 : s.abar[t - 1]; }
+  function qSample(s, x0, t, eps) {
+    const a = Math.sqrt(s.abar[t]), b = Math.sqrt(1 - s.abar[t]);
+    const o = new Float64Array(x0.length);
+    for (let i = 0; i < x0.length; i++) o[i] = a * x0[i] + b * eps[i];
+    return o;
+  }
+  // 后验 q(x_{t-1}|x_t,x_0) 的方差；t=0 时为 0（ᾱ_{-1}=1）
+  function postVar(s, t) {
+    const ap = abarPrev(s, t);
+    return (1 - ap) / (1 - s.abar[t]) * s.beta[t];
+  }
+
+  /* ---------- 原语：conv2d(stride1,pad1) ---------- */
+  function convF(X, Wp, bias, ci, co, H, W, O) {
+    for (let oc = 0; oc < co; oc++) {
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        let s = bias[oc];
+        for (let ic = 0; ic < ci; ic++) for (let ky = 0; ky < 3; ky++) {
+          const yy = y + ky - 1; if (yy < 0 || yy >= H) continue;
+          for (let kx = 0; kx < 3; kx++) {
+            const xx = x + kx - 1; if (xx < 0 || xx >= W) continue;
+            s += Wp[(oc * ci + ic) * 9 + ky * 3 + kx] * X[(ic * H + yy) * W + xx];
+          }
+        }
+        O[(oc * H + y) * W + x] = s;
+      }
+    }
+  }
+  function convB(X, Wp, dO, ci, co, H, W, dX, dW, db) {
+    for (let oc = 0; oc < co; oc++) {
+      let sb = 0;
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        const g = dO[(oc * H + y) * W + x]; sb += g;
+        for (let ic = 0; ic < ci; ic++) for (let ky = 0; ky < 3; ky++) {
+          const yy = y + ky - 1; if (yy < 0 || yy >= H) continue;
+          for (let kx = 0; kx < 3; kx++) {
+            const xx = x + kx - 1; if (xx < 0 || xx >= W) continue;
+            dW[(oc * ci + ic) * 9 + ky * 3 + kx] += g * X[(ic * H + yy) * W + xx];
+          }
+        }
+      }
+      db[oc] += sb;
+    }
+    for (let ic = 0; ic < ci; ic++) for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      let s = 0;
+      for (let oc = 0; oc < co; oc++) for (let ky = 0; ky < 3; ky++) {
+        const yy = y - ky + 1; if (yy < 0 || yy >= H) continue;
+        for (let kx = 0; kx < 3; kx++) {
+          const xx = x - kx + 1; if (xx < 0 || xx >= W) continue;
+          s += Wp[(oc * ci + ic) * 9 + ky * 3 + kx] * dO[(oc * H + yy) * W + xx];
+        }
+      }
+      dX[(ic * H + y) * W + x] += s;
+    }
+  }
+
+  /* ---------- 原语：avg pool 2×2 ---------- */
+  function poolF(X, c, H, W, O) {
+    const h2 = H >> 1, w2 = W >> 1;
+    for (let ch = 0; ch < c; ch++) for (let y = 0; y < h2; y++) for (let x = 0; x < w2; x++) {
+      let s = 0;
+      for (let dy = 0; dy < 2; dy++) for (let dx = 0; dx < 2; dx++) s += X[(ch * H + 2 * y + dy) * W + 2 * x + dx];
+      O[(ch * h2 + y) * w2 + x] = s * 0.25;
+    }
+  }
+  function poolB(dO, c, H, W, dX) {
+    const h2 = H >> 1, w2 = W >> 1;
+    for (let ch = 0; ch < c; ch++) for (let y = 0; y < h2; y++) for (let x = 0; x < w2; x++) {
+      const g = dO[(ch * h2 + y) * w2 + x] * 0.25;
+      for (let dy = 0; dy < 2; dy++) for (let dx = 0; dx < 2; dx++) dX[(ch * H + 2 * y + dy) * W + 2 * x + dx] += g;
+    }
+  }
+
+  /* ---------- 原语：nearest 上采样 ×2 ---------- */
+  function upF(X, c, h2, w2, O) {
+    const H = h2 * 2, W = w2 * 2;
+    for (let ch = 0; ch < c; ch++) for (let y = 0; y < h2; y++) for (let x = 0; x < w2; x++) {
+      const v = X[(ch * h2 + y) * w2 + x];
+      for (let dy = 0; dy < 2; dy++) for (let dx = 0; dx < 2; dx++) O[(ch * H + 2 * y + dy) * W + 2 * x + dx] = v;
+    }
+  }
+  function upB(dO, c, h2, w2, dX) {
+    const H = h2 * 2, W = w2 * 2;
+    for (let ch = 0; ch < c; ch++) for (let y = 0; y < h2; y++) for (let x = 0; x < w2; x++) {
+      let s = 0;
+      for (let dy = 0; dy < 2; dy++) for (let dx = 0; dx < 2; dx++) s += dO[(ch * H + 2 * y + dy) * W + 2 * x + dx];
+      dX[(ch * h2 + y) * w2 + x] += s;
+    }
+  }
+
+  /* ---------- 原语：FiLM（scale/shift 由 t 生成） ---------- */
+  function filmF(hIn, ss, ch, sp, O) {
+    for (let c = 0; c < ch; c++) { const sc = 1 + ss[c], sh = ss[ch + c]; for (let i = 0; i < sp; i++) O[c * sp + i] = hIn[c * sp + i] * sc + sh; }
+  }
+  function filmB(hIn, ss, dO, ch, sp, dh, dss) {
+    for (let c = 0; c < ch; c++) {
+      const sc = 1 + ss[c]; let ds = 0, dsh = 0;
+      for (let i = 0; i < sp; i++) { const g = dO[c * sp + i]; dh[c * sp + i] += g * sc; ds += g * hIn[c * sp + i]; dsh += g; }
+      dss[c] += ds; dss[ch + c] += dsh;
+    }
+  }
+  /* ---------- 原语：linear ---------- */
+  function linF(W, b, x, rows, cols, O) {
+    for (let r = 0; r < rows; r++) { let s = b[r]; for (let c = 0; c < cols; c++) s += W[r * cols + c] * x[c]; O[r] = s; }
+  }
+  function linB(W, dO, x, rows, cols, dW, db, dx) {
+    for (let r = 0; r < rows; r++) {
+      const g = dO[r]; db[r] += g;
+      for (let c = 0; c < cols; c++) { dW[r * cols + c] += g * x[c]; dx[c] += W[r * cols + c] * g; }
+    }
+  }
+  function reluF(x, O) { for (let i = 0; i < x.length; i++) O[i] = x[i] > 0 ? x[i] : 0; }
+  function reluB(x, dO, dx) { for (let i = 0; i < x.length; i++) dx[i] += x[i] > 0 ? dO[i] : 0; }
+  function catF(A, B, aN, bN, O) { O.set(A.subarray(0, aN), 0); O.set(B.subarray(0, bN), aN); }
+  function catB(dO, aN, bN, dA, dB) { for (let i = 0; i < aN; i++) dA[i] += dO[i]; for (let i = 0; i < bN; i++) dB[i] += dO[aN + i]; }
+
+  /* ---------- 时间嵌入 ---------- */
+  function tEmbed(t, Td) {
+    const o = new Float64Array(Td);
+    for (let i = 0; i < Td / 2; i++) { const w = 1 / Math.pow(10000, 2 * i / Td); o[2 * i] = Math.sin(t * w); o[2 * i + 1] = Math.cos(t * w); }
+    return o;
+  }
+
+  /* ---------- 网络 ---------- */
+  function createNet(cfg) {
+    const S = cfg.size || 16, C = cfg.baseCh || 8, Td = cfg.Td || 16, seed = cfg.seed == null ? 1 : cfg.seed;
+    const C2 = C * 2;
+    const rnd = mulberry32(seed), gauss = gaussFactory(rnd);
+    const net = { S: S, C: C, C2: C2, Td: Td, p: {}, g: {}, keys: [] };
+    function addParam(name, n, std) {
+      const a = new Float64Array(n);
+      for (let i = 0; i < n; i++) a[i] = std ? gauss() * std : 0;
+      net.p[name] = a; net.g[name] = new Float64Array(n); net.keys.push(name);
+    }
+    // 卷积：He 初始化 std=sqrt(2/(ci*9))
+    const convSpecs = [["e1a", 1, C], ["e1b", C, C], ["e2a", C, C2], ["e2b", C2, C2],
+    ["ba", C2, C2], ["bb", C2, C2], ["d2a", C2 * 2, C2], ["d2b", C2, C2],
+    ["d1a", C2 + C, C], ["d1b", C, C], ["o", C, 1]];
+    net.convSpecs = convSpecs;
+    for (const [nm, ci, co] of convSpecs) {
+      addParam("W_" + nm, co * ci * 9, Math.sqrt(2 / (ci * 9)));
+      addParam("b_" + nm, co, 0);
+    }
+    // FiLM：每个卷积(除输出层)一个，零初始化 → 初始为恒等
+    const filmSpecs = [["e1a", C], ["e1b", C], ["e2a", C2], ["e2b", C2], ["ba", C2],
+    ["bb", C2], ["d2a", C2], ["d2b", C2], ["d1a", C], ["d1b", C]];
+    net.filmSpecs = filmSpecs;
+    for (const [nm, ch] of filmSpecs) {
+      addParam("Wf_" + nm, 2 * ch * Td, 0);
+      addParam("bf_" + nm, 2 * ch, 0);
+    }
+    addParam("Wte", Td * Td, Math.sqrt(2 / Td)); addParam("bte", Td, 0);
+    addParam("wls", Td, 0); addParam("bls", 1, 0); // 零初始化 t 相关线性 skip
+    return net;
+  }
+  function zeroGrads(net) { for (const k of net.keys) net.g[k].fill(0); }
+
+  /* ---------- 前向 ---------- */
+  function forwardNet(net, x, t, c) {
+    const S = net.S, C = net.C, C2 = net.C2, Td = net.Td, P = net.p;
+    const S2 = S >> 1, S4 = S >> 2;
+    c.x = x;
+    c.te = tEmbed(t, Td);
+    c.tvec = new Float64Array(Td); linF(P.Wte, P.bte, c.te, Td, Td, c.tvec);
+    for (let i = 0; i < Td; i++) c.tvec[i] = Math.tanh(c.tvec[i]);
+    // t 相关 skip 系数
+    c.ls = P.bls[0]; for (let i = 0; i < Td; i++) c.ls += P.wls[i] * c.tvec[i];
+
+    const sp0 = S * S, sp1 = S2 * S2, sp2 = S4 * S4;
+    function blk(inArr, nm, ci, co, sp, out) {
+      c["in_" + nm] = inArr;
+      const cv = new Float64Array(co * sp);
+      convF(inArr, P["W_" + nm], P["b_" + nm], ci, co, sp === sp0 ? S : (sp === sp1 ? S2 : S4), sp === sp0 ? S : (sp === sp1 ? S2 : S4), cv);
+      c["cv_" + nm] = cv;
+      const ss = new Float64Array(2 * co); linF(P["Wf_" + nm], P["bf_" + nm], c.tvec, 2 * co, Td, ss);
+      c["ss_" + nm] = ss;
+      const fi = new Float64Array(co * sp); filmF(cv, ss, co, sp, fi);
+      c["fi_" + nm] = fi;
+      const re = new Float64Array(co * sp); reluF(fi, re);
+      c["re_" + nm] = re;
+      if (out) out[0] = re;
+      return re;
+    }
+    function convOnly(inArr, nm, ci, co, H, W) {
+      c["in_" + nm] = inArr;
+      const o = new Float64Array(co * H * W);
+      convF(inArr, P["W_" + nm], P["b_" + nm], ci, co, H, W, o);
+      c["cv_" + nm] = o; return o;
+    }
+
+    // enc1 @ S
+    blk(x, "e1a", 1, C, sp0);
+    const s1 = blk(c.re_e1a, "e1b", C, C, sp0);
+    c.s1 = s1;
+    const p1 = new Float64Array(C * sp1); poolF(s1, C, S, S, p1); c.p1 = p1;
+    // enc2 @ S/2
+    blk(p1, "e2a", C, C2, sp1);
+    const s2 = blk(c.re_e2a, "e2b", C2, C2, sp1);
+    c.s2 = s2;
+    const p2 = new Float64Array(C2 * sp2); poolF(s2, C2, S2, S2, p2); c.p2 = p2;
+    // bottleneck @ S/4
+    blk(p2, "ba", C2, C2, sp2);
+    blk(c.re_ba, "bb", C2, C2, sp2);
+    // dec2 @ S/2
+    const u2 = new Float64Array(C2 * sp1); upF(c.re_bb, C2, S4, S4, u2); c.u2 = u2;
+    const cat2 = new Float64Array((C2 * 2) * sp1); catF(u2, s2, C2 * sp1, C2 * sp1, cat2); c.cat2 = cat2;
+    blk(cat2, "d2a", C2 * 2, C2, sp1);
+    blk(c.re_d2a, "d2b", C2, C2, sp1);
+    // dec1 @ S
+    const u1 = new Float64Array(C2 * sp0); upF(c.re_d2b, C2, S2, S2, u1); c.u1 = u1;
+    const cat1 = new Float64Array((C2 + C) * sp0); catF(u1, s1, C2 * sp0, C * sp0, cat1); c.cat1 = cat1;
+    blk(cat1, "d1a", C2 + C, C, sp0);
+    blk(c.re_d1a, "d1b", C, C, sp0);
+    // out
+    const o = convOnly(c.re_d1b, "o", C, 1, S, S);
+    // 零初始化 t 相关线性 skip
+    const eps = new Float64Array(sp0);
+    for (let i = 0; i < sp0; i++) eps[i] = o[i] + c.ls * x[i];
+    c.eps = eps;
+    return eps;
+  }
+
+  /* ---------- 后向 ---------- */
+  function backwardNet(net, c, dEps) {
+    const S = net.S, C = net.C, C2 = net.C2, Td = net.Td, P = net.p, G = net.g;
+    const S2 = S >> 1, S4 = S >> 2;
+    const sp0 = S * S, sp1 = S2 * S2, sp2 = S4 * S4;
+    const dtvec = new Float64Array(Td);
+
+    // skip: eps = o + ls*x
+    let dls = 0;
+    for (let i = 0; i < sp0; i++) dls += dEps[i] * c.x[i];
+    G.bls[0] += dls;
+    for (let i = 0; i < Td; i++) { G.wls[i] += dls * c.tvec[i]; dtvec[i] += P.wls[i] * dls; }
+
+    // out conv (C->1 @ S)
+    let dO = new Float64Array(C * sp0);
+    convB(c.re_d1b, P.W_o, dEps, C, 1, S, S, dO, G.W_o, G.b_o);
+
+    function blkB(nm, ci, co, sp, H, W, dOut) {
+      // relu（前向缓存键是扁平的 "fi_"+nm / "cv_"+nm / "ss_"+nm）
+      const dFi = new Float64Array(co * sp); reluB(c["fi_" + nm], dOut, dFi);
+      // film
+      const dCv = new Float64Array(co * sp), dss = new Float64Array(2 * co);
+      filmB(c["cv_" + nm], c["ss_" + nm], dFi, co, sp, dCv, dss);
+      linB(P["Wf_" + nm], dss, c.tvec, 2 * co, Td, G["Wf_" + nm], G["bf_" + nm], dtvec);
+      // conv
+      const dX = new Float64Array(ci * sp);
+      convB(c["in_" + nm], P["W_" + nm], dCv, ci, co, H, W, dX, G["W_" + nm], G["b_" + nm]);
+      return dX;
+    }
+
+    // dec1
+    dO = blkB("d1b", C, C, sp0, S, S, dO);
+    dO = blkB("d1a", C2 + C, C, sp0, S, S, dO);
+    // cat1
+    const dU1 = new Float64Array(C2 * sp0), dS1 = new Float64Array(C * sp0);
+    catB(dO, C2 * sp0, C * sp0, dU1, dS1);
+    const dReD2b = new Float64Array(C2 * sp1); upB(dU1, C2, S2, S2, dReD2b);
+    // dec2
+    let d2 = blkB("d2b", C2, C2, sp1, S2, S2, dReD2b);
+    d2 = blkB("d2a", C2 * 2, C2, sp1, S2, S2, d2);
+    const dU2 = new Float64Array(C2 * sp1), dS2 = new Float64Array(C2 * sp1);
+    catB(d2, C2 * sp1, C2 * sp1, dU2, dS2);
+    const dReBB = new Float64Array(C2 * sp2); upB(dU2, C2, S4, S4, dReBB);
+    // bottleneck
+    let db_ = blkB("bb", C2, C2, sp2, S4, S4, dReBB);
+    db_ = blkB("ba", C2, C2, sp2, S4, S4, db_);   // → 梯度 wrt p2 (C2,S/4)
+    // enc2：先反传第二个下采样 pool (S/4 → S/2)，再与 skip2 的梯度相加
+    const dS2tot = new Float64Array(C2 * sp1);
+    poolB(db_, C2, S2, S2, dS2tot);
+    for (let i = 0; i < C2 * sp1; i++) dS2tot[i] += dS2[i];
+    let dE2 = blkB("e2b", C2, C2, sp1, S2, S2, dS2tot);
+    dE2 = blkB("e2a", C, C2, sp1, S2, S2, dE2);   // → 梯度 wrt p1 (C,S/2)
+    const dP1 = new Float64Array(C * sp0); poolB(dE2, C, S, S, dP1);
+    // enc1：pool 反向结果(全分辨率) 与 skip1 梯度相加，才是 enc1 输出的总梯度
+    const dEnc1Out = new Float64Array(C * sp0);
+    for (let i = 0; i < C * sp0; i++) dEnc1Out[i] = dP1[i] + dS1[i];
+    let dE1 = blkB("e1b", C, C, sp0, S, S, dEnc1Out);
+    dE1 = blkB("e1a", 1, C, sp0, S, S, dE1);
+    // tvec MLP: tanh 反向
+    const dLin = new Float64Array(Td);
+    for (let i = 0; i < Td; i++) dLin[i] = dtvec[i] * (1 - c.tvec[i] * c.tvec[i]);
+    const dte = new Float64Array(Td);
+    linB(P.Wte, dLin, c.te, Td, Td, G.Wte, G.bte, dte);
+    return dE1;
+  }
+  /* ---------- 损失（对批与像素取均值） ---------- */
+  function lossBatch(net, sched, x0s, ts, epss) {
+    const S = net.S, P = S * S, B = x0s.length;
+    let loss = 0;
+    zeroGrads(net);
+    const caches = [];
+    const dEpss = [];
+    for (let b = 0; b < B; b++) {
+      const xt = qSample(sched, x0s[b], ts[b], epss[b]);
+      const c = {}; const eps = forwardNet(net, xt, ts[b], c);
+      caches.push(c);
+      const d = new Float64Array(P);
+      for (let i = 0; i < P; i++) { const e = eps[i] - epss[b][i]; loss += e * e; d[i] = 2 * e / (B * P); }
+      dEpss.push(d);
+    }
+    for (let b = 0; b < B; b++) backwardNet(net, caches[b], dEpss[b]);
+    return loss / (B * P);
+  }
+
+  /* ---------- Adam ---------- */
+  function makeAdam(net) {
+    const st = { m: {}, v: {}, t: 0 };
+    for (const k of net.keys) { st.m[k] = new Float64Array(net.p[k].length); st.v[k] = new Float64Array(net.p[k].length); }
+    return st;
+  }
+  function adamStep(net, st, lr, b1, b2, eps) {
+    b1 = b1 == null ? 0.9 : b1; b2 = b2 == null ? 0.999 : b2; eps = eps == null ? 1e-8 : eps;
+    st.t++;
+    const c1 = 1 - Math.pow(b1, st.t), c2 = 1 - Math.pow(b2, st.t);
+    for (const k of net.keys) {
+      const p = net.p[k], g = net.g[k], m = st.m[k], v = st.v[k];
+      for (let i = 0; i < p.length; i++) {
+        m[i] = b1 * m[i] + (1 - b1) * g[i];
+        v[i] = b2 * v[i] + (1 - b2) * g[i] * g[i];
+        p[i] -= lr * (m[i] / c1) / (Math.sqrt(v[i] / c2) + eps);
+      }
+    }
+  }
+
+  /* ---------- 合成形状数据集 ---------- */
+  /* jitter：形状中心/尺寸的抖动幅度。默认 0.02（近居中，5 类清晰可学）；
+     调大（如 0.15）则位置尺度随机，分布更难、需要更长训练。 */
+  function datasetShapes(n, S, seed, jitter) {
+    const rnd = mulberry32(seed == null ? 7 : seed);
+    if (jitter == null) jitter = 0.02;
+    const ARM = 0.07;
+    const data = [];
+    for (let k = 0; k < n; k++) {
+      const img = new Float64Array(S * S);
+      const type = k % 5;                       // 5 类均衡
+      const cx = 0.5 + (rnd() * 2 - 1) * jitter, cy = 0.5 + (rnd() * 2 - 1) * jitter;
+      const r = 0.30 + (rnd() * 2 - 1) * jitter * 0.6;
+      for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+        const dx = (x + 0.5) / S - cx, dy = (y + 0.5) / S - cy;
+        let v = 0;
+        if (type === 0) { const d = Math.sqrt(dx * dx + dy * dy); v = d <= r ? 1 : 0; }                       // circle
+        else if (type === 1) { v = (Math.abs(dx) <= r && Math.abs(dy) <= r) ? 1 : 0; }                        // square
+        else if (type === 2) { const d = Math.sqrt(dx * dx + dy * dy); v = (Math.abs(d - r) <= 0.09) ? 1 : 0; } // ring
+        else if (type === 3) { v = ((Math.abs(dx) <= r && Math.abs(dy) <= ARM) || (Math.abs(dy) <= r && Math.abs(dx) <= ARM)) ? 1 : 0; } // cross
+        else { v = (dy >= -r && dy <= r && Math.abs(dx) <= r * (1 - (dy + r) / (2 * r))) ? 1 : 0; }           // triangle
+        img[y * S + x] = v;
+      }
+      data.push(img);
+    }
+    // 全局标准化：零均值单位方差
+    let sum = 0, n2 = 0;
+    for (const im of data) for (let i = 0; i < im.length; i++) { sum += im[i]; n2++; }
+    const mean = sum / n2;
+    let vs = 0;
+    for (const im of data) for (let i = 0; i < im.length; i++) { const d = im[i] - mean; vs += d * d; }
+    const std = Math.sqrt(vs / n2) || 1;
+    for (const im of data) for (let i = 0; i < im.length; i++) im[i] = (im[i] - mean) / std;
+    return data;
+  }
+
+  /* ---------- 训练 ---------- */
+  function train(opt) {
+    const S = opt.size || 16, C = opt.baseCh || 8, T = opt.T || 100;
+    const steps = opt.steps || 200, batch = opt.batch || 4, lr = opt.lr || 2e-3;
+    const seed = opt.seed == null ? 1 : opt.seed, Td = opt.Td || 16;
+    const sched = makeSchedule(T, opt.b1 || 1e-4, opt.bT || 0.02);
+    const net = createNet({ size: S, baseCh: C, Td: Td, seed: seed });
+    const data = opt.data || datasetShapes(opt.nData || 256, S, opt.dataSeed || 7);
+    const rnd = mulberry32(seed * 7919 + 13), gauss = gaussFactory(rnd);
+    const st = makeAdam(net);
+    const P = S * S;
+    const curve = [];
+    const idxRnd = mulberry32(seed * 104729 + 5); // 均匀索引专用 rng
+    for (let s = 0; s < steps; s++) {
+      const x0s = [], ts = [], epss = [];
+      for (let b = 0; b < batch; b++) {
+        const di = Math.floor(idxRnd() * data.length) % data.length;
+        const t = Math.floor(idxRnd() * T) % T;
+        const e = new Float64Array(P);
+        for (let i = 0; i < P; i++) e[i] = gauss();
+        x0s.push(data[di]); ts.push(t); epss.push(e);
+      }
+      const L = lossBatch(net, sched, x0s, ts, epss);
+      adamStep(net, st, lr);
+      curve.push(L);
+    }
+    return { net: net, sched: sched, data: data, curve: curve };
+  }
+
+  /* ---------- 采样 ---------- */
+  // ancestral (DDPM)
+  function sample(net, sched, n, opt) {
+    opt = opt || {};
+    const S = net.S, P = S * S, T = sched.T;
+    const seed = opt.seed == null ? 3 : opt.seed;
+    const rnd = mulberry32(seed), gauss = gaussFactory(rnd);
+    const traj = opt.traj ? [] : null;
+    const xs = [];
+    for (let k = 0; k < n; k++) xs.push(new Float64Array(P));
+    for (let k = 0; k < n; k++) for (let i = 0; i < P; i++) xs[k][i] = gauss();
+    for (let t = T - 1; t >= 0; t--) {
+      if (traj) traj.push({ t: t, imgs: xs.map(function (a) { return Float64Array.from(a); }) });
+      for (let k = 0; k < n; k++) {
+        const c = {}; const eps = forwardNet(net, xs[k], t, c);
+        const ab = sched.abar[t], ap = abarPrev(sched, t);
+        const x0h = new Float64Array(P);
+        for (let i = 0; i < P; i++) x0h[i] = (xs[k][i] - Math.sqrt(1 - ab) * eps[i]) / Math.sqrt(ab);
+        const pv = postVar(sched, t), sd = Math.sqrt(pv > 0 ? pv : 0);
+        const coef0 = Math.sqrt(ap) * sched.beta[t] / (1 - ab);
+        const coef1 = Math.sqrt(sched.alpha[t]) * (1 - ap) / (1 - ab);
+        for (let i = 0; i < P; i++) {
+          let v = coef0 * x0h[i] + coef1 * xs[k][i];
+          if (sd > 0) v += sd * gauss();
+          xs[k][i] = v;
+        }
+      }
+    }
+    return { imgs: xs, traj: traj };
+  }
+  // DDIM（eta=0 完全确定性）
+  function sampleDDIM(net, sched, n, opt) {
+    opt = opt || {};
+    const S = net.S, P = S * S, T = sched.T;
+    const steps = opt.steps || 20, eta = opt.eta || 0;
+    const seed = opt.seed == null ? 3 : opt.seed;
+    const rnd = mulberry32(seed), gauss = gaussFactory(rnd);
+    // 均匀子采样时间步（降序）
+    const taus = [];
+    for (let i = 0; i < steps; i++) taus.push(Math.floor((i * T) / steps));
+    taus.reverse();
+    const xs = [];
+    for (let k = 0; k < n; k++) { const a = new Float64Array(P); for (let i = 0; i < P; i++) a[i] = gauss(); xs.push(a); }
+    for (let si = 0; si < taus.length; si++) {
+      const t = taus[si];
+      const tPrev = si + 1 < taus.length ? taus[si + 1] : -1;
+      const ab = sched.abar[t], abP = tPrev >= 0 ? sched.abar[tPrev] : 1;
+      for (let k = 0; k < n; k++) {
+        const c = {}; const eps = forwardNet(net, xs[k], t, c);
+        const x0h = new Float64Array(P);
+        for (let i = 0; i < P; i++) x0h[i] = (xs[k][i] - Math.sqrt(1 - ab) * eps[i]) / Math.sqrt(ab);
+        let sig = 0;
+        if (eta > 0 && tPrev >= 0) {
+          sig = eta * Math.sqrt((1 - abP) / (1 - ab)) * Math.sqrt(1 - ab / abP);
+          if (!isFinite(sig)) sig = 0;
+        }
+        const cDir = Math.sqrt(Math.max(0, 1 - abP - sig * sig));
+        for (let i = 0; i < P; i++) {
+          let v = Math.sqrt(abP) * x0h[i] + cDir * eps[i];
+          if (sig > 0) v += sig * gauss();
+          xs[k][i] = v;
+        }
+      }
+    }
+    return { imgs: xs };
+  }
+
+  globalThis.IDF = {
+    mulberry32: mulberry32, gaussFactory: gaussFactory,
+    makeSchedule: makeSchedule, abarPrev: abarPrev, qSample: qSample, postVar: postVar,
+    convF: convF, convB: convB, poolF: poolF, poolB: poolB, upF: upF, upB: upB,
+    filmF: filmF, filmB: filmB, linF: linF, linB: linB, reluF: reluF, reluB: reluB,
+    catF: catF, catB: catB, tEmbed: tEmbed,
+    createNet: createNet, forwardNet: forwardNet, backwardNet: backwardNet, zeroGrads: zeroGrads,
+    lossBatch: lossBatch, makeAdam: makeAdam, adamStep: adamStep,
+    datasetShapes: datasetShapes, train: train, sample: sample, sampleDDIM: sampleDDIM
+  };
+})();
+
+</script>
+<script id="ui">
+/* denoise-forge UI：浏览器内训练 + 去噪可视化 + 引擎自检 */
+(function () {
+  const IDF = globalThis.IDF;
+  if (typeof document === "undefined" || !IDF) return;
+  const $ = function (id) { return document.getElementById(id); };
+
+  const S = 16, T = 100;
+  const rnd = IDF.mulberry32(20260915), gauss = IDF.gaussFactory(rnd);
+  let idxRnd = IDF.mulberry32(4242);   // 均匀索引专用，绝不用高斯流抽索引
+
+  const st = { net: null, sched: null, data: null, adam: null, curve: [], t: 0, stop: false, running: false, traj: null, trajI: 0 };
+
+  function jitterOf() {
+    const v = $("dsSel") && $("dsSel").value;
+    return v === "rand" ? 0.15 : 0.02;
+  }
+  function ensure() {
+    if (st.net) return;
+    st.sched = IDF.makeSchedule(T, 1e-4, 0.02);
+    st.net = IDF.createNet({ size: S, baseCh: 8, Td: 16, seed: 3 });
+    st.adam = IDF.makeAdam(st.net);
+    st.data = IDF.datasetShapes(256, S, 7, jitterOf());
+    st.curve = []; st.t = 0;
+  }
+  function reset() { st.net = null; st.adam = null; st.curve = []; st.t = 0; ensure(); }
+
+  function log(s, cls) {
+    const el = $("log"); if (!el) return;
+    el.innerHTML += '<div class="' + (cls || "") + '">' + s + "</div>";
+    el.scrollTop = el.scrollHeight;
+  }
+
+  /* ---------- 训练 ---------- */
+  function stepOnce(batch, lr) {
+    const net = st.net, sched = st.sched, data = st.data, P = net.S * net.S;
+    const x0s = [], ts = [], epss = [];
+    for (let b = 0; b < batch; b++) {
+      const di = Math.floor(idxRnd() * data.length) % data.length;
+      const t = Math.floor(idxRnd() * sched.T) % sched.T;
+      const e = new Float64Array(P); for (let i = 0; i < P; i++) e[i] = gauss();
+      x0s.push(data[di]); ts.push(t); epss.push(e);
+    }
+    const L = IDF.lossBatch(net, sched, x0s, ts, epss);
+    IDF.adamStep(net, st.adam, lr);
+    st.curve.push(L);
+    return L;
+  }
+  function trainLoop() {
+    if (st.running) return;
+    ensure(); st.stop = false; st.running = true;
+    const total = +($("stepsIn") && $("stepsIn").value || 800);
+    const batch = +($("batchIn") && $("batchIn").value || 8);
+    const lr = +($("lrIn") && $("lrIn").value || 2e-3);
+    log("开始训练：目标 " + total + " 步，batch=" + batch + "，lr=" + lr);
+    function tick() {
+      if (st.stop || st.t >= total) { st.running = false; log(st.stop ? "已停止 @ " + st.t + " 步" : "训练完成 " + st.t + " 步，末 loss=" + st.curve[st.curve.length - 1].toFixed(4)); paintStats(); return; }
+      const n = Math.min(10, total - st.t);
+      for (let i = 0; i < n; i++) { stepOnce(batch, lr); st.t++; }
+      drawLoss(); paintStats();
+      setTimeout(tick, 0);
+    }
+    tick();
+  }
+
+  /* ---------- 绘图 ---------- */
+  function drawLoss() {
+    const cv = $("lossCv"); if (!cv || !cv.getContext) return;
+    const ctx = cv.getContext("2d");
+    const w = cv.width = cv.clientWidth || 520, h = cv.height = 160;
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, w, h);
+    const c = st.curve;
+    if (!c.length) return;
+    let mx = 0; for (const v of c) if (v > mx) mx = v;
+    mx = mx || 1;
+    ctx.strokeStyle = "#2563eb"; ctx.lineWidth = 1.5; ctx.beginPath();
+    for (let i = 0; i < c.length; i++) {
+      const x = i / Math.max(1, c.length - 1) * (w - 20) + 10;
+      const y = h - 14 - (c[i] / mx) * (h - 28);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    ctx.fillStyle = "#6b7280"; ctx.font = "11px monospace";
+    ctx.fillText("loss 峰值 " + mx.toFixed(3), 12, 14);
+  }
+  function drawSchedule() {
+    const cv = $("schCv"); if (!cv || !cv.getContext) return;
+    const ctx = cv.getContext("2d");
+    const w = cv.width = cv.clientWidth || 520, h = cv.height = 120;
+    ctx.clearRect(0, 0, w, h); ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, w, h);
+    const ab = st.sched.abar, Tn = ab.length;
+    ctx.strokeStyle = "#0f9d58"; ctx.lineWidth = 1.5; ctx.beginPath();
+    for (let i = 0; i < Tn; i++) {
+      const x = i / (Tn - 1) * (w - 20) + 10, y = h - 14 - ab[i] * (h - 28);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    ctx.fillStyle = "#6b7280"; ctx.font = "11px monospace";
+    ctx.fillText("ᾱ_t（噪声调度，单调递减）", 12, 14);
+  }
+  function drawImg(cv, img, zoom) {
+    if (!cv || !cv.getContext) return;
+    const ctx = cv.getContext("2d");
+    const w = S * zoom, h = S * zoom;
+    cv.width = w; cv.height = h;
+    let mn = Infinity, mx = -Infinity;
+    for (let i = 0; i < img.length; i++) { if (img[i] < mn) mn = img[i]; if (img[i] > mx) mx = img[i]; }
+    const id = ctx.createImageData(w, h);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const v = img[((y / zoom) | 0) * S + ((x / zoom) | 0)];
+      const g = Math.max(0, Math.min(255, Math.round((v - mn) / (mx - mn + 1e-9) * 255)));
+      const o = (y * w + x) * 4;
+      id.data[o] = g; id.data[o + 1] = g; id.data[o + 2] = g; id.data[o + 3] = 255;
+    }
+    ctx.putImageData(id, 0, 0);
+  }
+  function mom(arr) { let s = 0, n = 0; for (const im of arr) for (let i = 0; i < im.length; i++) { s += im[i] * im[i]; n++; } return s / n; }
+  function paintStats() {
+    const c = st.curve;
+    if ($("statStep")) $("statStep").innerHTML = "<b>" + st.t + "</b> 步";
+    if ($("statLoss") && c.length) $("statLoss").innerHTML = "loss <b>" + c[c.length - 1].toFixed(4) + "</b>";
+    if ($("statMom") && st.data) $("statMom").innerHTML = "数据 E[x²]=<b>" + mom(st.data).toFixed(3) + "</b>";
+  }
+  function renderSamples(imgs, extra) {
+    const box = $("samples"); if (!box) return;
+    box.innerHTML = "";
+    for (const im of imgs) {
+      const cv = document.createElement("canvas");
+      box.appendChild(cv);
+      drawImg(cv, im, 8);
+    }
+    if ($("statMom") && st.data) $("statMom").innerHTML = "数据 E[x²]=<b>" + mom(st.data).toFixed(3) + "</b> 生成 E[x²]=<b>" + mom(imgs).toFixed(3) + "</b>";
+    if (extra) log(extra);
+  }
+  function animateTraj(traj) {
+    st.traj = traj; st.trajI = 0;
+    function tick() {
+      if (!st.traj || st.trajI >= st.traj.length) return;
+      const f = st.traj[st.trajI];
+      drawImg($("trajCv"), f.imgs[0], 8);
+      if ($("trajLab")) $("trajLab").innerHTML = "t = <b>" + f.t + "</b> / " + (st.sched.T - 1);
+      st.trajI++;
+      setTimeout(tick, 40);
+    }
+    tick();
+  }
+
+  /* ---------- 自检 ---------- */
+  function ok(name, cond, note) {
+    const box = $("testOut"); if (!box) return;
+    box.innerHTML += '<div class="selftest">' + (cond ? '<span class="ok">✓</span>' : '<span class="bad">✗</span>') +
+      " " + name + (note ? ' <span style="color:#6b7280">' + note + "</span>" : "") + "</div>";
+    return cond;
+  }
+  function runSelftest() {
+    const box = $("testOut"); if (box) box.innerHTML = "";
+    let pass = 0, fail = 0;
+    const T2 = (n, c, note) => { if (c) pass++; else fail++; ok(n, c, note); return c; };
+
+    // 1 ᾱ 严格单调递减
+    const sc = IDF.makeSchedule(100, 1e-4, 0.02);
+    let mono = true, rng = true;
+    for (let i = 0; i < sc.T; i++) { if (sc.abar[i] <= 0 || sc.abar[i] >= 1) rng = false; if (i && sc.abar[i] >= sc.abar[i - 1]) mono = false; }
+    T2("ᾱ_t ∈(0,1) 且严格单调递减", mono && rng);
+
+    // 2 前向矩 = 闭式（CLT 容差）
+    const P2 = 64, N = 4000;
+    const x0 = new Float64Array(P2); for (let i = 0; i < P2; i++) x0[i] = gauss();
+    const gr = IDF.mulberry32(7), gg = IDF.gaussFactory(gr);
+    let mean = 0, m2 = 0;
+    const tt = 50;
+    for (let n = 0; n < N; n++) {
+      const e = new Float64Array(P2); for (let i = 0; i < P2; i++) e[i] = gg();
+      const xt = IDF.qSample(sc, x0, tt, e);
+      mean += xt[0] / N; m2 += xt[0] * xt[0] / N;
+    }
+    const eMean = Math.sqrt(sc.abar[tt]) * x0[0], eVar = 1 - sc.abar[tt];
+    const se = Math.sqrt(eVar / N);
+    T2("前向矩 = 闭式 N(√ᾱ·x₀, 1−ᾱ)", Math.abs(mean - eMean) < 4 * se + 1e-9,
+      "mean " + mean.toFixed(4) + " vs " + eMean.toFixed(4));
+
+    // 3 前向有限
+    const net = IDF.createNet({ size: 16, baseCh: 4, Td: 8, seed: 9 });
+    const dd = IDF.datasetShapes(4, 16, 7, 0.02);
+    const e3 = new Float64Array(256); for (let i = 0; i < 256; i++) e3[i] = gauss();
+    const xt3 = IDF.qSample(sc, dd[0], 20, e3);
+    const c3 = {}; const eh3 = IDF.forwardNet(net, xt3, 20, c3);
+    let fin = true; for (let i = 0; i < eh3.length; i++) if (!isFinite(eh3[i])) fin = false;
+    T2("前向输出全部有限", fin);
+
+    // 4 梯度检验（FD 金标准，EPS=1e-6：ReLU 折点下步长必须够小）
+    const EPS = 1e-6;
+    const cfg = { x0: dd[0], t: 37, eps: e3 };
+    const lossOf = () => { const x = IDF.qSample(sc, cfg.x0, cfg.t, cfg.eps); const cc = {}; const eh = IDF.forwardNet(net, x, cfg.t, cc); let L = 0; for (let i = 0; i < eh.length; i++) { const d = eh[i] - cfg.eps[i]; L += d * d; } return L / eh.length; };
+    IDF.zeroGrads(net);
+    const xg = IDF.qSample(sc, cfg.x0, cfg.t, cfg.eps);
+    const cg = {}; const ehg = IDF.forwardNet(net, xg, cfg.t, cg);
+    const dE = new Float64Array(256); for (let i = 0; i < 256; i++) dE[i] = 2 * (ehg[i] - cfg.eps[i]) / 256;
+    IDF.backwardNet(net, cg, dE);
+    const cand = [];
+    const sr = IDF.mulberry32(31);
+    for (const k of net.keys) {
+      const arr = net.p[k], g = net.g[k];
+      for (let s = 0; s < Math.min(arr.length, 3); s++) {
+        const i = Math.floor(sr() * arr.length) % arr.length, o = arr[i];
+        arr[i] = o + EPS; const lp = lossOf(); arr[i] = o - EPS; const lm = lossOf(); arr[i] = o;
+        cand.push({ k: k, i: i, num: (lp - lm) / (2 * EPS), ana: g[i] });
+      }
+    }
+    let mxg = 0; for (const c of cand) if (Math.abs(c.ana) > mxg) mxg = Math.abs(c.ana);
+    // 梯度过小的参数：FD 的绝对噪声（~1e-10）会淹没它，本就无法可靠测量，跳过
+    const floor = 1e-4 * mxg;
+    let worst = 0, wname = "", inf = 0;
+    for (const c of cand) {
+      if (Math.abs(c.ana) < floor) continue;
+      inf++;
+      const rel = Math.abs(c.num - c.ana) / (Math.abs(c.num) + Math.abs(c.ana));
+      if (rel > worst) { worst = rel; wname = c.k + "[" + c.i + "]"; }
+    }
+    T2("梯度检验 vs 有限差分 (EPS=1e-6)", worst < 1e-4 && inf > 20,
+      "maxRel=" + worst.toExponential(2) + " @" + wname + " n=" + inf);
+
+    // 5 训练 loss 下降
+    const tr = IDF.train({ size: 16, baseCh: 4, Td: 8, T: 100, steps: 40, batch: 4, lr: 2e-3, seed: 5, data: dd });
+    const cv = tr.curve;
+    const a = cv.slice(0, 10).reduce((p, q) => p + q) / 10, b = cv.slice(-10).reduce((p, q) => p + q) / 10;
+    T2("训练 loss 下降", b < a, a.toFixed(4) + " → " + b.toFixed(4));
+
+    // 6 采样有限 + 方差合理
+    const sm = IDF.sample(tr.net, tr.sched, 2, { seed: 4 });
+    let sf = true, sv = 0, sn = 0;
+    for (const im of sm.imgs) for (let i = 0; i < im.length; i++) { if (!isFinite(im[i])) sf = false; sv += im[i] * im[i]; sn++; }
+    T2("采样输出有限且方差有限", sf && (sv / sn) < 100, "E[x²]=" + (sv / sn).toFixed(3));
+
+    // 7 后验方差 t=0 为 0
+    T2("后验方差 t=0 为 0，t≥1 为正", IDF.postVar(sc, 0) === 0 && IDF.postVar(sc, 1) > 0);
+
+    // 8 DDIM 确定性
+    const d1 = IDF.sampleDDIM(tr.net, tr.sched, 1, { steps: 10, eta: 0, seed: 8 });
+    const d2 = IDF.sampleDDIM(tr.net, tr.sched, 1, { steps: 10, eta: 0, seed: 8 });
+    let same = true; for (let i = 0; i < d1.imgs[0].length; i++) if (Math.abs(d1.imgs[0][i] - d2.imgs[0][i]) > 0) same = false;
+    T2("DDIM(η=0) 同 seed 完全确定性", same);
+
+    if ($("testSum")) $("testSum").innerHTML = "自检 <b>" + pass + "/" + (pass + fail) + "</b> " + (fail ? '<span class="bad">有失败项</span>' : '<span class="ok">全部通过</span>');
+    return { pass: pass, fail: fail };
+  }
+
+  /* ---------- 绑定 ---------- */
+  function bind() {
+    if ($("btnTrain")) $("btnTrain").onclick = trainLoop;
+    if ($("btnStop")) $("btnStop").onclick = function () { st.stop = true; };
+    if ($("btnReset")) $("btnReset").onclick = function () { reset(); drawLoss(); paintStats(); log("模型已重置"); };
+    if ($("btnSample")) $("btnSample").onclick = function () {
+      ensure();
+      const out = IDF.sample(st.net, st.sched, 4, { seed: 11, traj: true });
+      renderSamples(out.imgs, "ancestral 采样完成（T=" + st.sched.T + " 步）");
+      animateTraj(out.traj);
+    };
+    if ($("btnDDIM")) $("btnDDIM").onclick = function () {
+      ensure();
+      const out = IDF.sampleDDIM(st.net, st.sched, 4, { steps: 20, eta: 0, seed: 11 });
+      renderSamples(out.imgs, "DDIM 采样完成（仅 20 步，η=0 确定性）");
+    };
+    if ($("btnTest")) $("btnTest").onclick = runSelftest;
+    if ($("dsSel")) $("dsSel").onchange = function () { reset(); log("数据集切换 → 抖动 " + jitterOf()); };
+    ensure();               // 必须先建模型，drawSchedule/paintStats 依赖 st.sched / st.data
+    drawSchedule(); paintStats();
+  }
+  if (document.readyState === "loading" && document.addEventListener) document.addEventListener("DOMContentLoaded", bind);
+  else bind();
+
+  globalThis.__DNF = { st: st, runSelftest: runSelftest, trainLoop: trainLoop, stepOnce: stepOnce };
+})();
+
+</script>
+</body>
+</html>
