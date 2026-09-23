@@ -1,5 +1,12 @@
 # Denoise Forge — 图像扩散模型实验室（forge 系列 #15）
 
+<p align="center">
+  <a href="https://github.com/CJX0712/denoise-forge/actions/workflows/ci.yml"><img src="https://github.com/CJX0712/denoise-forge/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
+  <a href="https://github.com/CJX0712/denoise-forge/releases"><img src="https://img.shields.io/github/v/release/CJX0712/denoise-forge?sort=semver" alt="release"></a>
+  <a href="https://github.com/CJX0712/denoise-forge/blob/main/LICENSE"><img src="https://img.shields.io/github/license/CJX0712/denoise-forge" alt="license"></a>
+  <img src="https://img.shields.io/badge/author-%E6%99%A8%E6%98%9F-1f6feb" alt="author">
+</p>
+
 **零依赖 · 单文件 HTML · 引擎可无头自检的图像 DDPM。**
 
 从纯噪声到形状：浏览器内训练一个**真正的 U-Net 去噪网络**（卷积 + 下/上采样 + skip 连接 + FiLM 时间条件），实时观看 `x_T → x_0` 的完整去噪过程。引擎 `IDF.*` 无任何 DOM 依赖，可在 Node `vm` 中完整验证。打开 `index.html` 即用，无需构建、无需网络。
